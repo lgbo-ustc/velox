@@ -19,6 +19,8 @@
 #include "velox/exec/Task.h"
 #include "velox/exec/TraceUtil.h"
 #include "velox/expression/Expr.h"
+#include <iostream>
+#include <thread>
 
 using facebook::velox::common::testutil::TestValue;
 
@@ -52,6 +54,7 @@ TableScan::TableScan(
       scaledController_(driverCtx_->task->getScaledScanControllerLocked(
           driverCtx_->splitGroupId,
           planNodeId())) {
+  std::cerr << "xxx getOutputTimeLimitMs_ " << getOutputTimeLimitMs_ << std::endl;
   readBatchSize_ = driverCtx_->queryConfig().preferredOutputBatchRows();
 }
 
@@ -59,6 +62,8 @@ bool TableScan::shouldYield(StopReason taskStopReason, size_t startTimeMs)
     const {
   // Checks task-level yield signal, driver-level yield signal and table scan
   // output processing time limit.
+  std::cerr << "xxx should yield " << getOutputTimeLimitMs_ << " " << startTimeMs << " "
+      << getCurrentTimeMs() << std::endl;
   return taskStopReason == StopReason::kYield ||
       driverCtx_->driver->shouldYield() ||
       ((getOutputTimeLimitMs_ != 0) &&
@@ -71,16 +76,19 @@ bool TableScan::shouldStop(StopReason taskStopReason) const {
 }
 
 RowVectorPtr TableScan::getOutput() {
+  std::cerr << std::this_thread::get_id() << " xxx getOutput" << std::endl;
   VELOX_CHECK(!blockingFuture_.valid());
   blockingReason_ = BlockingReason::kNotBlocked;
 
   if (noMoreSplits_) {
+    std::cerr << "xxx noMoreSplits_" << std::endl;
     return nullptr;
   }
   // Check if we need to wait for scale up. We expect only wait once on startup.
   if (shouldWaitForScaleUp()) {
     VELOX_CHECK(blockingFuture_.valid());
     VELOX_CHECK_EQ(blockingReason_, BlockingReason::kWaitForScanScaleUp);
+    std::cerr << "xxx shouldWaitForScaleUp " << std::endl;
     return nullptr;
   }
 
@@ -97,18 +105,21 @@ RowVectorPtr TableScan::getOutput() {
       // A point for test code injection.
       TestValue::adjust(
           "facebook::velox::exec::TableScan::getOutput::yield", this);
+      std::cerr << "xxx should yield " << std::endl;
       return nullptr;
     }
 
     // Check no more split.
     if (noMoreSplits_) {
       VELOX_CHECK(needNewSplit_);
+      std::cerr << std::this_thread::get_id() << " xxx 2 noMoreSplits_" << std::endl;
       return nullptr;
     }
     // Check for cancellation since scans that filter everything out will not
     // hit the check in Driver.
     if (operatorCtx_->task()->isCancelled()) {
-      VELOX_CHECK(needNewSplit_);
+      VELOX_CHECK(needNewSplit_); 
+      std::cerr << "xxx is cancelled" << std::endl;
       return nullptr;
     }
 
@@ -117,8 +128,11 @@ RowVectorPtr TableScan::getOutput() {
       if (!hasNewSplit) {
         VELOX_CHECK(needNewSplit_);
         if (blockingReason_ != BlockingReason::kNotBlocked) {
+          std::cerr << "xxx 2 !hasNewSplit" << std::endl;
           return nullptr;
         }
+
+        std::cerr << "xxx continue !needNewSplit_" << std::endl;
         continue;
       }
 
@@ -146,6 +160,7 @@ RowVectorPtr TableScan::getOutput() {
     std::optional<RowVectorPtr> dataOptional;
     {
       MicrosecondTimer timer(&ioTimeUs);
+      std::cerr << std::this_thread::get_id() << " xxx call source next" << std::endl;
       dataOptional = dataSource_->next(readBatchSize, blockingFuture_);
     }
 
@@ -158,6 +173,7 @@ RowVectorPtr TableScan::getOutput() {
 
       if (!dataOptional.has_value()) {
         blockingReason_ = BlockingReason::kWaitForConnector;
+        std::cerr << std::this_thread::get_id() << " xxx data option is null" << std::endl;
         return nullptr;
       }
 
@@ -166,6 +182,7 @@ RowVectorPtr TableScan::getOutput() {
 
       RowVectorPtr data = std::move(dataOptional).value();
       if (data != nullptr) {
+        std::cerr << "xxx data size: " << data->size()  << std::endl;
         if (data->size() > 0) {
           lockedStats->addInputVector(data->estimateFlatSize(), data->size());
           constexpr int kMaxSelectiveBatchSizeMultiplier = 4;
